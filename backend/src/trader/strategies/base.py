@@ -1,0 +1,61 @@
+"""Strategy interface. A strategy is a pure function of past closes."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+import pandas as pd
+
+
+class Strategy(ABC):
+    name: str = "base"
+    lesson: str = "reading-a-recommendation"  # the Learn lesson that explains this strategy
+
+    @property
+    @abstractmethod
+    def lookback_days(self) -> int:
+        """Trading days of history needed before the first valid signal."""
+
+    @abstractmethod
+    def target_weights(self, closes: pd.DataFrame) -> pd.DataFrame:
+        """Target portfolio weights, one row per day and one column per symbol.
+
+        Row t may only use closes up to and including t (decided after that close).
+        Weights are in [-1, 1], below zero for a short (forex only, when short selling is on),
+        and each row's absolute weights sum to at most 1; the rest is cash.
+        """
+
+    @abstractmethod
+    def params(self) -> dict[str, Any]:
+        """The parameters that define this instance."""
+
+    @abstractmethod
+    def variants(self) -> list[Strategy]:
+        """The same strategy with its parameters moved about 20% each way (Gate 1 robustness)."""
+
+    def rule_text(self) -> str:
+        """One sentence, in plain words, on what the strategy holds."""
+        return f"{type(self).__name__} with {self.params()}."
+
+    def explain(self, closes: pd.DataFrame) -> dict[str, str]:
+        """Why each symbol is in or out as of the last row of `closes`, in plain words."""
+        weights = self.target_weights(closes)
+        if weights.empty:
+            return {}
+        last = weights.iloc[-1]
+        return {
+            symbol: f"Target {float(last[symbol]):.0%} of equity." if last[symbol] != 0 else "Target 0%."
+            for symbol in closes.columns
+        }
+
+    def describe(self) -> dict[str, Any]:
+        return {"name": self.name, **self.params()}
+
+    def history_days(self) -> int:
+        """Calendar days of history the live pipeline fetches so its signals match the backtest."""
+        return int(self.lookback_days * 1.5) + 45
+
+    def __repr__(self) -> str:
+        args = ", ".join(f"{k}={v}" for k, v in self.params().items())
+        return f"{type(self).__name__}({args})"
