@@ -119,10 +119,10 @@ def _today_ny() -> date:
     return datetime.now(NY).date()
 
 
-def _load_closes(settings: Settings, start: date, end: date) -> pd.DataFrame:
+def _load_closes(settings: Settings, start: date, end: date, extra: tuple[str, ...] = ()) -> pd.DataFrame:
     from trader.data import get_bar_source
 
-    symbols = list(dict.fromkeys([*settings.universe_list, settings.benchmark_symbol]))
+    symbols = list(dict.fromkeys([*settings.universe_list, *extra, settings.benchmark_symbol]))
     closes = get_bar_source(settings).get_closes(symbols, start, end)
     if closes.empty:
         _fail(f"No price data between {start} and {end}.")
@@ -155,7 +155,9 @@ def _development_backtest(
     from trader.backtest import backtest_report, run_backtest
     from trader.risk.limits import RiskLimits
 
-    closes = _load_closes(settings, start_day - timedelta(days=strategy.history_days()), end_day)
+    closes = _load_closes(
+        settings, start_day - timedelta(days=strategy.history_days()), end_day, strategy.extra_symbols()
+    )
     limits = RiskLimits.from_settings(settings)
     result = run_backtest(
         closes,
@@ -286,7 +288,11 @@ def fetch_data(
         source = AlpacaBarSource(
             settings.alpaca_api_key, settings.alpaca_secret_key, settings.alpaca_data_feed
         )
-    symbols = list(dict.fromkeys([*settings.universe_list, settings.benchmark_symbol]))
+    symbols = list(
+        dict.fromkeys(
+            [*settings.universe_list, *_strategy(settings).extra_symbols(), settings.benchmark_symbol]
+        )
+    )
     closes = source.get_closes(symbols, date.fromisoformat(start), _today_ny())
     if closes.empty:
         _fail(f"{'OANDA' if settings.is_forex else 'Alpaca'} returned no bars. Check your keys and symbols.")
@@ -371,7 +377,10 @@ def gate1(
             abort=True,
         )
     closes = _load_closes(
-        settings, date.fromisoformat(start) - timedelta(days=chosen.history_days()), _today_ny()
+        settings,
+        date.fromisoformat(start) - timedelta(days=chosen.history_days()),
+        _today_ny(),
+        chosen.extra_symbols(),
     )
     criteria = Gate1Criteria(min_calmar_ratio, max_drawdown, min_trades)
     report = evaluate_gate1(
@@ -446,7 +455,7 @@ def gate4(
         report = evaluate_gate4(
             session,
             settings,
-            lambda end: _load_closes(settings, first, end),
+            lambda end: _load_closes(settings, first, end, chosen.extra_symbols()),
             chosen,
             RiskLimits.from_settings(settings),
             Gate4Criteria(weeks=weeks),

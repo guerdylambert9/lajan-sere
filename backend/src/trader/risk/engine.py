@@ -32,6 +32,7 @@ class RiskContext:
     pending_exit_positions: int = 0  # exits planned ahead of these entries
     extra_buying_power: float = 0.0  # cash the planned exits will free
     whole_units: bool = True  # stocks: whole shares; forex: whole currency units; crypto: slices of a coin
+    cash_symbols: frozenset[str] = field(default_factory=frozenset)  # idle-cash funds: not a position
 
 
 def check_order(
@@ -110,7 +111,8 @@ def _check_entry(
     intent: OrderIntent, account: AccountState, limits: RiskLimits, ctx: RiskContext, add
 ) -> None:  # noqa: ANN001
     symbol = intent.symbol
-    if symbol not in ctx.universe:
+    parking = symbol in ctx.cash_symbols  # BIL counts as cash: no stop, no size cap, no position slot
+    if symbol not in ctx.universe and not parking:
         add("not_in_universe", f"{symbol} is not on the approved ticker list.")
     if account.drawdown_pct >= limits.max_drawdown_pct:
         add(
@@ -146,22 +148,22 @@ def _check_entry(
     same_side = existing is not None and existing.qty != 0 and (existing.qty < 0) == short
     existing_value = existing.exposure if existing is not None and same_side else 0.0
     position_pct = (existing_value + intent.notional) / equity * 100
-    if position_pct > limits.max_position_pct + EPS:
+    if not parking and position_pct > limits.max_position_pct + EPS:
         add(
             "position_size",
             f"{symbol} would be {position_pct:.1f}% of equity; the limit is {limits.max_position_pct:g}%.",
         )
 
-    if intent.stop_price is None:
+    if not parking and intent.stop_price is None:
         add("missing_stop", "Every entry needs a protective stop.")
-    elif not short and intent.stop_price >= intent.limit_price:
+    elif not parking and not short and intent.stop_price >= intent.limit_price:
         add("invalid_stop", f"Stop {intent.stop_price} must sit below the limit price {intent.limit_price}.")
-    elif short and intent.stop_price <= intent.limit_price:
+    elif not parking and short and intent.stop_price <= intent.limit_price:
         add(
             "invalid_stop",
             f"A short's stop {intent.stop_price} must sit above the limit price {intent.limit_price}.",
         )
-    else:
+    elif not parking:
         # A crypto stop-limit can sell as low as its limit, past the stop itself.
         worst = limits.worst_exit_price(intent.stop_price, short)
         loss = money.loss_at(symbol, intent.signed_qty, intent.limit_price, worst)
@@ -172,8 +174,9 @@ def _check_entry(
                 f"Loss at the stop would be {risk_pct:.2f}% of equity; the limit is {limits.risk_per_trade_pct:g}%.",
             )
 
-    if not same_side:
-        open_after = len(account.held_symbols()) - ctx.pending_exit_positions + ctx.pending_new_positions + 1
+    if not parking and not same_side:
+        held = {s for s in account.held_symbols() if s not in ctx.cash_symbols}
+        open_after = len(held) - ctx.pending_exit_positions + ctx.pending_new_positions + 1
         if open_after > limits.max_open_positions:
             add(
                 "max_positions",

@@ -88,15 +88,23 @@ def run_backtest(
     rules: AssetRules | None = None,
 ) -> BacktestResult:
     config = config or BacktestConfig()
-    symbols = [s for s in (universe or list(closes.columns)) if s in closes.columns]
-    rules = rules or AssetRules.for_symbols(symbols)
+    park = strategy.cash_park()
+    park_symbol = park.symbol if park is not None else None
+    listed = [s for s in (universe or list(closes.columns)) if s in closes.columns]
+    if park_symbol is not None and park_symbol not in closes.columns:
+        raise ValueError(
+            f"No {park_symbol} prices. {strategy.name} puts cash beyond a {park.buffer:.0%} buffer into it."
+        )
+    symbols = [s for s in listed if s != park_symbol]
+    price_symbols = [*symbols, *([park_symbol] if park_symbol and park_symbol not in symbols else [])]
+    rules = rules or AssetRules.for_symbols(price_symbols)
     if not symbols:
         raise ValueError("None of the universe symbols are in the price data.")
     if len(closes) < 2:
         raise ValueError("Need at least two days of prices.")
 
-    prices = closes[symbols].astype(float)
-    weights = strategy.target_weights(prices).reindex(columns=symbols).fillna(0.0)
+    prices = closes[price_symbols].astype(float)
+    weights = strategy.target_weights(closes[symbols]).reindex(columns=symbols).fillna(0.0)
     targets = weights.shift(config.lag - 1).fillna(0.0)
     cost = config.cost_bps / 10_000
     financing_rate = config.financing_bps_per_year / 10_000
@@ -158,6 +166,44 @@ def run_backtest(
             }
         )
 
+    def reduce_position(symbol: str, qty: float, when: pd.Timestamp, price: float, reason: str) -> None:
+        """Sell part of a long cash-fund holding. Other exits still close the whole position."""
+        nonlocal cash
+        held = shares[symbol]
+        qty = min(qty, held)
+        net_price = price * (1 - cost)
+        entry_date, entry_price = entries[symbol]
+        cash += money.value(symbol, qty, entry_price, net_price)
+        left = held - qty
+        if left <= 1e-9:
+            shares.pop(symbol)
+            entries.pop(symbol)
+            stops.pop(symbol, None)
+        else:
+            shares[symbol] = left
+        trades.append(
+            {
+                "symbol": symbol,
+                "entry_date": entry_date,
+                "entry_price": entry_price,
+                "qty": qty,
+                "exit_date": when,
+                "exit_price": net_price,
+                "return_pct": (net_price / entry_price - 1) * 100 if entry_price else 0.0,
+                "exit_reason": reason,
+            }
+        )
+        fills.append(
+            {
+                "date": when,
+                "symbol": symbol,
+                "side": "sell",
+                "qty": qty,
+                "price": price,
+                "notional": money.notional(symbol, qty, price),
+            }
+        )
+
     for i, when in enumerate(prices.index):
         charged = 0.0
         if financing_rate and shares and previous_day is not None:
@@ -168,7 +214,7 @@ def run_backtest(
         financing_values.append(charged)
         previous_day = when
         today: dict[str, float] = {}
-        for j, symbol in enumerate(symbols):
+        for j, symbol in enumerate(price_symbols):
             value = price_matrix[i, j]
             if np.isfinite(value) and value > 0:
                 today[symbol] = float(value)
@@ -210,11 +256,21 @@ def run_backtest(
             "bt",
             exclude=stopped | missing,
             rules=rules,
+            cash_park=park,
         )
         for intent in intents:
             price = today[intent.symbol]
             if intent.kind == IntentKind.EXIT:
-                close_position(intent.symbol, when, price, "signal")
+                held_qty = shares.get(intent.symbol, 0.0)
+                partial = (
+                    park_symbol is not None
+                    and intent.symbol == park_symbol
+                    and 0 < intent.qty < abs(held_qty) - 1e-9
+                )
+                if partial:
+                    reduce_position(intent.symbol, intent.qty, when, price, "signal")
+                else:
+                    close_position(intent.symbol, when, price, "signal")
                 continue
             short = intent.side == Side.SELL
             fill_price = price * (1 - cost) if short else price * (1 + cost)
@@ -223,9 +279,21 @@ def run_backtest(
             if qty <= 0:
                 continue
             cash -= money.notional(intent.symbol, qty, fill_price)
-            shares[intent.symbol] = -qty if short else qty
-            stops[intent.symbol] = intent.stop_price
-            entries[intent.symbol] = (when, fill_price)
+            topping_up = park_symbol is not None and intent.symbol == park_symbol and intent.symbol in shares
+            if topping_up and not short:
+                old_qty = shares[intent.symbol]
+                old_entry = entries[intent.symbol][1]
+                new_qty = old_qty + qty
+                entries[intent.symbol] = (
+                    entries[intent.symbol][0],
+                    (old_qty * old_entry + qty * fill_price) / new_qty,
+                )
+                shares[intent.symbol] = new_qty
+                stops[intent.symbol] = intent.stop_price
+            else:
+                shares[intent.symbol] = -qty if short else qty
+                stops[intent.symbol] = intent.stop_price
+                entries[intent.symbol] = (when, fill_price)
             fills.append(
                 {
                     "date": when,
@@ -243,7 +311,7 @@ def run_backtest(
         peak = max(peak, equity)
         previous_equity = equity
         equity_values.append(equity)
-        open_counts.append(len(shares))
+        open_counts.append(sum(1 for symbol in shares if symbol != park_symbol))
         exposure_values.append(gross / equity if equity > 0 else 0.0)
 
     for symbol, qty in shares.items():

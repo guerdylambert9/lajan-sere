@@ -57,7 +57,9 @@ def replay(
         raise ValueError("Replays only run against the fake broker (BROKER=fake).")
     settings = ctx.settings
     broker = ctx.broker
-    symbols = list(dict.fromkeys([*settings.universe_list, settings.benchmark_symbol]))
+    symbols = list(
+        dict.fromkeys([*settings.universe_list, *ctx.strategy.extra_symbols(), settings.benchmark_symbol])
+    )
     closes = ctx.bars.get_closes(symbols, start, end)
     days = [ts for ts in closes.index if start <= ts.date() <= end]
 

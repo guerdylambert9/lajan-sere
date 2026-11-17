@@ -1,10 +1,12 @@
 from trader.strategies.base import Strategy
 from trader.strategies.momentum import Momentum
 from trader.strategies.trend import TrendFollowing
+from trader.strategies.trend_bil import TrendWithBills
 
 STRATEGIES: dict[str, type[Strategy]] = {
     TrendFollowing.name: TrendFollowing,
     Momentum.name: Momentum,
+    TrendWithBills.name: TrendWithBills,
 }
 
 
@@ -22,4 +24,4 @@ def get_strategy(name: str, shorts: bool = False) -> Strategy:
     return TrendFollowing(shorts=True)
 
 
-__all__ = ["STRATEGIES", "Momentum", "Strategy", "TrendFollowing", "get_strategy"]
+__all__ = ["STRATEGIES", "Momentum", "Strategy", "TrendFollowing", "TrendWithBills", "get_strategy"]
