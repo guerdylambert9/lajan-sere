@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class CashPark:
+    """Idle cash parked in one fund. Only a strategy that opts in uses this.
+
+    Cash beyond `buffer` (a share of the account) is the target. The holding is resized when it
+    drifts `band` (a share of the account) off that target. A drift of exactly `band` stays put.
+    """
+
+    symbol: str
+    buffer: float = 0.02
+    band: float = 0.05
 
 
 class Strategy(ABC):
@@ -51,6 +65,15 @@ class Strategy(ABC):
 
     def describe(self) -> dict[str, Any]:
         return {"name": self.name, **self.params()}
+
+    def cash_park(self) -> CashPark | None:
+        """The idle-cash fund, or None when this strategy leaves spare cash as cash."""
+        return None
+
+    def extra_symbols(self) -> tuple[str, ...]:
+        """Symbols to price besides the traded universe, such as the cash fund."""
+        park = self.cash_park()
+        return (park.symbol,) if park is not None else ()
 
     def history_days(self) -> int:
         """Calendar days of history the live pipeline fetches so its signals match the backtest."""

@@ -43,6 +43,11 @@ class SubmitResult:
     skipped_reason: str | None = None
 
 
+def _cash_symbols(ctx: AppContext) -> frozenset[str]:
+    park = ctx.strategy.cash_park()
+    return frozenset({park.symbol}) if park is not None else frozenset()
+
+
 def refresh_intent(
     ctx: AppContext, row: ProposalRow, account: AccountState
 ) -> tuple[OrderIntent | None, Violation | None]:
@@ -52,12 +57,14 @@ def refresh_intent(
     rules = ctx.rules
     buffer = limits.entry_limit_buffer_pct / 100
     price = ctx.broker.latest_price(row.symbol)
+    parking = row.symbol in _cash_symbols(ctx)
 
     if row.kind == IntentKind.EXIT:
         position = account.positions.get(row.symbol)
         long = row.side == Side.SELL  # a sell closes a long, a buy closes a short
         held = (position.qty if long else -position.qty) if position is not None else 0.0
-        qty = rules.floor_qty(row.symbol, held) if held > 0 else 0.0
+        # A cash-fund sale resizes or funds an entry: it sells the planned shares, not the whole lot.
+        qty = rules.floor_qty(row.symbol, min(row.qty, held) if parking else held) if held > 0 else 0.0
         if qty <= 0:
             return None, Violation(
                 code="no_position",
@@ -100,10 +107,15 @@ def refresh_intent(
         )
     limit, stop = entry_prices(rules, limits, row.symbol, price, short)
     unit = money.unit_cost(row.symbol, limit)
-    cap_by_limits = rules.floor_qty(row.symbol, limits.max_entry_fraction() * account.equity / unit)
     cap_by_cash = rules.floor_qty(row.symbol, account.buying_power / unit)
-    qty = min(float(row.qty), cap_by_limits, cap_by_cash)
-    qty = cap_by_risk(rules, limits, row.symbol, qty, limit, stop, account.equity, short)
+    if parking:
+        # No 10% cap and no stop: the cash fund is not a risk position.
+        stop = None
+        qty = min(float(row.qty), cap_by_cash)
+    else:
+        cap_by_limits = rules.floor_qty(row.symbol, limits.max_entry_fraction() * account.equity / unit)
+        qty = min(float(row.qty), cap_by_limits, cap_by_cash)
+        qty = cap_by_risk(rules, limits, row.symbol, qty, limit, stop, account.equity, short)
     if qty <= 0:
         wanted = f"the smallest {row.symbol} order" if rules.crypto else f"one {row.symbol} {rules.unit}"
         return None, Violation(code="insufficient_cash", message=f"Not enough buying power for {wanted}.")
@@ -168,6 +180,7 @@ def submit_approved(ctx: AppContext) -> SubmitResult:
         sent_today = ledger.orders_submitted_on(session, today, ctx.tz, ctx.label)
         account = load_account_state(ctx, session)
         new_entries: set[str] = set()
+        cash_symbols = _cash_symbols(ctx)
 
         for row in proposals:
             try:
@@ -185,6 +198,7 @@ def submit_approved(ctx: AppContext) -> SubmitResult:
                         session_close=clock.session_close if clock else None,
                         pending_new_positions=len(new_entries - account.held_symbols()),
                         whole_units=ctx.rules.whole_units(),
+                        cash_symbols=cash_symbols,
                     )
                     violations = list(check_order(intent, account, ctx.limits, risk_ctx).violations)
                 if violations or intent is None:
@@ -216,7 +230,7 @@ def submit_approved(ctx: AppContext) -> SubmitResult:
                 result.submitted.append(row.id)
                 sent_today += 1
                 used_ids.add(intent.client_order_id)
-                if intent.kind == IntentKind.ENTRY:
+                if intent.kind == IntentKind.ENTRY and intent.symbol not in cash_symbols:
                     new_entries.add(intent.symbol)
                     if ctx.is_crypto:
                         crypto_entries.append(intent.client_order_id)

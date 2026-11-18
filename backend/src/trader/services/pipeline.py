@@ -76,7 +76,7 @@ def run_nightly(
     universe = settings.universe_list
     end = as_of or ctx.bar_date()
     start = end - timedelta(days=ctx.strategy.history_days())
-    symbols = list(dict.fromkeys([*universe, settings.benchmark_symbol]))
+    symbols = list(dict.fromkeys([*universe, *ctx.strategy.extra_symbols(), settings.benchmark_symbol]))
     closes = ctx.bars.get_closes(symbols, start, end)
     if closes.empty:
         return PipelineResult(as_of=None, skipped_reason="No price data returned.")
@@ -90,12 +90,19 @@ def run_nightly(
     universe_closes = closes[[s for s in universe if s in closes.columns]]
     weights = ctx.strategy.target_weights(universe_closes)
     last_row = universe_closes.iloc[-1]
-    targets = {s: float(weights.iloc[-1][s]) for s in universe_closes.columns}
+    targets = {s: float(weights.iloc[-1][s]) for s in universe_closes.columns if s in weights.columns}
     prices = {
         s: float(last_row[s])
         for s in universe_closes.columns
         if is_number(last_row[s]) and pd.notna(last_row[s])
     }
+    park = ctx.strategy.cash_park()
+    if park is not None and park.symbol in closes.columns:
+        quoted = closes[park.symbol].iloc[-1]
+        if is_number(quoted) and pd.notna(quoted) and quoted > 0:
+            prices[park.symbol] = float(quoted)
+    elif park is not None:
+        log.warning("No %s prices; idle cash stays in cash.", park.symbol)
     ctx.sync_fake_prices(prices)
 
     result = PipelineResult(as_of=last_date, targets=targets)
@@ -131,6 +138,7 @@ def run_nightly(
             exclude=exclude,
             skipped=skipped,
             rules=ctx.rules,
+            cash_park=park,
         )
         save_snapshot(
             session,
@@ -142,7 +150,8 @@ def run_nightly(
             skipped=skipped,
         )
 
-        exits = [i for i in intents if i.kind == IntentKind.EXIT]
+        cash_symbols = frozenset({park.symbol}) if park is not None else frozenset()
+        exits = [i for i in intents if i.kind == IntentKind.EXIT and i.symbol not in cash_symbols]
         engaged = killswitch.is_engaged(session)
         used_ids = ledger.used_client_order_ids(session)
         accepted_entries = 0
@@ -160,8 +169,9 @@ def run_nightly(
                 enforce_time_window=False,
                 pending_new_positions=accepted_entries,
                 pending_exit_positions=len(exits),
-                extra_buying_power=freed_cash(exits, account),
+                extra_buying_power=freed_cash([i for i in intents if i.kind == IntentKind.EXIT], account),
                 whole_units=ctx.rules.whole_units(),
+                cash_symbols=cash_symbols,
             )
             violations = list(check_order(intent, account, ctx.limits, risk_ctx).violations)
             vetoes = settings.ai_veto_rating_set
@@ -187,7 +197,11 @@ def run_nightly(
                 at=ctx.now(),
             )
             rows.append(row)
-            if status != ProposalStatus.BLOCKED and intent.kind == IntentKind.ENTRY:
+            if (
+                status != ProposalStatus.BLOCKED
+                and intent.kind == IntentKind.ENTRY
+                and intent.symbol not in cash_symbols
+            ):
                 accepted_entries += 1
 
         ledger.set_state(

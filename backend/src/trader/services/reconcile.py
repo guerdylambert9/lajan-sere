@@ -127,6 +127,8 @@ def reconcile(ctx: AppContext) -> ReconcileResult:
 
         open_orders = ctx.broker.get_open_orders()
         universe = set(settings.universe_list)
+        park = ctx.strategy.cash_park()
+        cash_symbols = {park.symbol} if park is not None else set()
         unit = f"{ctx.rules.unit}s"
         for position in ctx.broker.get_positions():
             if position.qty < 0 and not ctx.is_forex:  # only the forex book may sell short
@@ -142,7 +144,10 @@ def reconcile(ctx: AppContext) -> ReconcileResult:
             if position.qty == 0 or (ctx.is_crypto and ctx.rules.is_dust(position.symbol, position.qty)):
                 continue
             # A long needs a sell stop under it, a short a buy stop over it.
-            if not any(o.symbol == position.symbol and o.protects(position.qty) for o in open_orders):
+            # The cash fund is exempt: it is cash, so it has no stop and is not an unmanaged ETF.
+            if position.symbol not in cash_symbols and not any(
+                o.symbol == position.symbol and o.protects(position.qty) for o in open_orders
+            ):
                 held = (
                     f"{fmt_qty(position.qty)} {unit}"
                     if position.qty > 0
@@ -155,7 +160,7 @@ def reconcile(ctx: AppContext) -> ReconcileResult:
                         "message": f"{position.symbol}: {held} with no protective stop at the broker.",
                     }
                 )
-            if position.symbol not in universe:
+            if position.symbol not in universe and position.symbol not in cash_symbols:
                 mismatches.append(
                     {
                         "type": "unmanaged_position",

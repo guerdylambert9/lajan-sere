@@ -12,6 +12,7 @@ whose target turns to the other side is closed first; the new side opens on a la
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 
@@ -19,6 +20,7 @@ from trader import money
 from trader.assets import AssetRules, code_symbol
 from trader.models import AccountState, IntentKind, OrderIntent, Side
 from trader.risk.limits import RiskLimits
+from trader.strategies.base import CashPark
 from trader.utils import is_number
 
 
@@ -89,6 +91,148 @@ def _too_small(rules: AssetRules, symbol: str, limit: float, cash: float, sized:
     )
 
 
+def drifts_off_target(current: float, target: float, equity: float, band: float) -> bool:
+    """True when `current` is off `target` by more than `band` of the account.
+
+    A drift of exactly `band` is still inside the resize band and does not trade.
+    """
+    if equity <= 0:
+        return False
+    return abs(target - current) / equity > band
+
+
+def _park_holding(
+    cash_park: CashPark | None,
+    prices: Mapping[str, float],
+    account: AccountState,
+    rules: AssetRules,
+    blocked: bool,
+) -> tuple[float, float]:
+    """Shares of the cash fund already held, and the price to value them at. (0, 0) when it can't trade."""
+    if cash_park is None or blocked:
+        return 0.0, 0.0
+    position = account.positions.get(cash_park.symbol)
+    quoted = prices.get(cash_park.symbol)
+    if not is_number(quoted) or quoted <= 0:
+        quoted = position.current_price if position is not None else 0.0
+    if not is_number(quoted) or quoted <= 0:
+        return 0.0, 0.0
+    qty = 0.0
+    if position is not None and position.qty > 0:
+        qty = rules.floor_qty(cash_park.symbol, position.qty)
+    return qty, float(quoted)
+
+
+def _shares_for_shortfall(
+    rules: AssetRules, symbol: str, shortfall: float, sell_limit: float, held: float
+) -> float:
+    """Whole shares to sell so the proceeds cover `shortfall`, and no more than `held`."""
+    per_share = money.notional(symbol, 1.0, sell_limit)
+    if shortfall <= 1e-9 or per_share <= 0 or held <= 0:
+        return 0.0
+    need = math.ceil(shortfall / per_share - 1e-9)
+    if need >= held:
+        return held
+    qty = rules.floor_qty(symbol, float(need))
+    if money.notional(symbol, qty, sell_limit) + 1e-9 < shortfall:
+        qty = min(held, rules.floor_qty(symbol, qty + rules.lot(symbol).qty_step))
+    return qty
+
+
+def _invested_value(
+    account: AccountState,
+    rules: AssetRules,
+    exiting: set[str],
+    park_symbol: str,
+    entries: Sequence[OrderIntent],
+) -> float:
+    """What the non-cash positions are worth after today's trend exits and entries."""
+    total = 0.0
+    for symbol, position in account.positions.items():
+        if symbol == park_symbol or symbol in exiting or position.qty <= 0:
+            continue
+        if rules.is_dust(symbol, position.qty):
+            continue
+        total += position.market_value
+    return total + sum(intent.notional for intent in entries)
+
+
+def _cash_fund_order(
+    cash_park: CashPark | None,
+    rules: AssetRules,
+    account: AccountState,
+    entries: Sequence[OrderIntent],
+    exiting: set[str],
+    limit_buffer: float,
+    park_qty: float,
+    park_left: float,
+    park_price: float,
+    sell_limit: float,
+    cash: float,
+    as_of: date,
+    cid_prefix: str,
+    blocked: bool,
+) -> OrderIntent | None:
+    """The one BIL order for today: a funding sale, a resize, or a buy of cash beyond the buffer.
+
+    `park_left` is what remains after selling shares to fund entries. That sale stands even inside
+    the resize band. A resize (buy or a further sale) happens only outside the band, and a buy
+    never spends the cash buffer.
+    """
+    if cash_park is None or blocked or park_price <= 0:
+        return None
+    symbol = cash_park.symbol
+    equity = account.equity
+    if equity <= 0:
+        return None
+    trend_value = _invested_value(account, rules, exiting, symbol, entries)
+    target_value = max(0.0, equity - trend_value - cash_park.buffer * equity)
+    current_value = park_left * park_price
+    final_qty = park_left
+    resized = False
+    if drifts_off_target(current_value, target_value, equity, cash_park.band):
+        target_qty = rules.floor_qty(symbol, target_value / park_price)
+        if target_qty > park_left and park_left == park_qty:
+            buy_limit = rules.price_up(symbol, park_price * (1 + limit_buffer))
+            room = max(0.0, cash - cash_park.buffer * equity)
+            extra = (
+                rules.floor_qty(symbol, room / money.unit_cost(symbol, buy_limit)) if buy_limit > 0 else 0.0
+            )
+            target_qty = min(target_qty, park_left + extra)
+        if target_qty < park_left or (target_qty > park_qty and park_left == park_qty):
+            final_qty = target_qty
+            resized = True
+    delta = final_qty - park_qty
+    if abs(delta) < rules.lot(symbol).min_qty - 1e-12:
+        return None
+    if delta > 0:
+        limit = rules.price_up(symbol, park_price * (1 + limit_buffer))
+        reason = f"Cash beyond a {cash_park.buffer:.0%} buffer goes into {symbol}"
+        side, action, kind = Side.BUY, "buy", IntentKind.ENTRY
+        stop = None
+    else:
+        limit = sell_limit
+        if resized:
+            reason = f"{symbol} is {cash_park.band:.0%} of the account off its target"
+        else:
+            reason = f"Sell {symbol} to fund an entry"
+        side, action, kind = Side.SELL, "sell", IntentKind.EXIT
+        stop = None
+        delta = -delta
+    if limit <= 0 or delta <= 0:
+        return None
+    return OrderIntent(
+        symbol=symbol,
+        side=side,
+        kind=kind,
+        qty=delta,
+        limit_price=limit,
+        stop_price=stop,
+        reason=reason,
+        client_order_id=client_order_id(cid_prefix, as_of, symbol, action),
+    )
+
+
 def plan_intents(
     targets: Mapping[str, float],
     prices: Mapping[str, float],
@@ -100,6 +244,7 @@ def plan_intents(
     exclude: set[str] | frozenset[str] = frozenset(),
     skipped: dict[str, str] | None = None,
     rules: AssetRules | None = None,
+    cash_park: CashPark | None = None,
 ) -> list[OrderIntent]:
     """Plan exits and entries for one rebalance.
 
@@ -111,6 +256,12 @@ def plan_intents(
     max_open_positions. Symbols are visited in universe order, so ties resolve the same way in
     the backtest and live.
 
+    `cash_park` opts one symbol in as idle cash (Candidate 3). After the trend orders, cash
+    beyond its buffer is the target for that symbol. It is sold first when an entry needs the
+    money, and resized when it drifts off target by more than the band. It takes no stop, ignores
+    the position-size cap and does not use an open-position slot. With `cash_park` left unset,
+    nothing here changes.
+
     Pass a dict as `skipped` to learn why a symbol with a target got no entry.
     `rules` sets the order sizes and price steps (default: whole shares, or crypto steps when
     the universe holds crypto pairs).
@@ -118,9 +269,14 @@ def plan_intents(
     rules = rules or AssetRules.for_symbols(universe)
     buffer = limits.entry_limit_buffer_pct / 100
     intents: list[OrderIntent] = []
+    park_symbol = cash_park.symbol if cash_park is not None else None
+    # An order already working for the cash fund: don't spend it or resize it again today.
+    park_blocked = park_symbol is not None and park_symbol in exclude
 
     exiting: set[str] = set()
     for symbol in universe:
+        if symbol == park_symbol:
+            continue
         position = account.positions.get(symbol)
         if position is None or rules.is_dust(symbol, abs(position.qty)) or symbol in exclude:
             continue
@@ -158,10 +314,20 @@ def plan_intents(
 
     cash = account.cash + freed_cash(intents, account)
     held = {s for s, p in account.positions.items() if not rules.is_dust(s, abs(p.qty))} - exiting
+    if park_symbol is not None:
+        held.discard(park_symbol)  # the cash fund is not one of the open positions
     open_count = len(held)
     max_fraction = limits.max_entry_fraction()
+    park_qty, park_price = _park_holding(cash_park, prices, account, rules, park_blocked)
+    park_left = park_qty
+    sell_limit = (
+        rules.price_down(park_symbol, park_price * (1 - buffer)) if park_symbol and park_price > 0 else 0.0
+    )
+    n_exits = len(intents)
 
     for symbol in universe:
+        if symbol == park_symbol:
+            continue
         weight = targets.get(symbol, 0.0)
         if not is_number(weight) or weight == 0:
             continue
@@ -188,13 +354,27 @@ def plan_intents(
             continue
         limit, stop = entry_prices(rules, limits, symbol, price, short)
         sized = min(abs(weight), max_fraction) * account.equity
-        dollars = min(sized, cash)
+        available = cash
+        if park_left > 0 and sell_limit > 0 and park_symbol is not None:
+            available += money.notional(park_symbol, park_left, sell_limit)
+        dollars = min(sized, available)
         qty = rules.floor_qty(symbol, dollars / money.unit_cost(symbol, limit))
         qty = cap_by_risk(rules, limits, symbol, qty, limit, stop, account.equity, short)
         if qty <= 0:
             if skipped is not None:
-                skipped[symbol] = _too_small(rules, symbol, limit, cash, sized)
+                skipped[symbol] = _too_small(rules, symbol, limit, available, sized)
             continue
+        cost = money.notional(symbol, qty, limit)
+        sold = 0.0
+        if cost > cash + 1e-9 and park_symbol is not None:
+            sold = _shares_for_shortfall(rules, park_symbol, cost - cash, sell_limit, park_left)
+        funded = cash + (money.notional(park_symbol, sold, sell_limit) if park_symbol is not None else 0.0)
+        if cost > funded + 0.01:
+            if skipped is not None:
+                skipped[symbol] = _too_small(rules, symbol, limit, funded, sized)
+            continue
+        park_left -= sold
+        cash = funded - cost
         intents.append(
             OrderIntent(
                 symbol=symbol,
@@ -211,7 +391,26 @@ def plan_intents(
                 client_order_id=client_order_id(cid_prefix, as_of, symbol, "short" if short else "buy"),
             )
         )
-        cash -= money.notional(symbol, qty, limit)
         open_count += 1
 
+    park_order = _cash_fund_order(
+        cash_park,
+        rules,
+        account,
+        intents[n_exits:],
+        exiting,
+        buffer,
+        park_qty,
+        park_left,
+        park_price,
+        sell_limit,
+        cash,
+        as_of,
+        cid_prefix,
+        park_blocked,
+    )
+    if park_order is not None and park_order.kind == IntentKind.EXIT:
+        intents.insert(n_exits, park_order)  # sold first, so the entry it funds can fill
+    elif park_order is not None:
+        intents.append(park_order)
     return intents
