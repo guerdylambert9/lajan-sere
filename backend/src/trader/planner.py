@@ -245,14 +245,16 @@ def plan_intents(
     skipped: dict[str, str] | None = None,
     rules: AssetRules | None = None,
     cash_park: CashPark | None = None,
+    position_cap: float | None = None,
+    use_stops: bool = True,
 ) -> list[OrderIntent]:
     """Plan exits and entries for one rebalance.
 
     Exits: a held universe symbol whose target is zero (or on the other side) is closed in full.
     Positions outside the universe are never touched (they are yours, not the strategy's).
     Entries: an unheld symbol with a target above zero is bought, and with a target below zero
-    sold short (only when limits.allow_shorts), at min(|target|, limits.max_entry_fraction())
-    of equity, capped by the cash left after exits, by the loss allowed at the stop and by
+    sold short (only when limits.allow_shorts), at min(|target|, the position cap) of equity,
+    capped by the cash left after exits, by the loss allowed at the stop and by
     max_open_positions. Symbols are visited in universe order, so ties resolve the same way in
     the backtest and live.
 
@@ -261,6 +263,10 @@ def plan_intents(
     money, and resized when it drifts off target by more than the band. It takes no stop, ignores
     the position-size cap and does not use an open-position slot. With `cash_park` left unset,
     nothing here changes.
+
+    `position_cap` replaces the account's position-size cap, as a share of equity, when a
+    strategy sets one. `use_stops=False` sends the entry without a stop and does not shrink it
+    to the per-trade risk limit. Left at their defaults, both keep the account's usual rules.
 
     Pass a dict as `skipped` to learn why a symbol with a target got no entry.
     `rules` sets the order sizes and price steps (default: whole shares, or crypto steps when
@@ -317,7 +323,7 @@ def plan_intents(
     if park_symbol is not None:
         held.discard(park_symbol)  # the cash fund is not one of the open positions
     open_count = len(held)
-    max_fraction = limits.max_entry_fraction()
+    max_fraction = limits.max_entry_fraction() if position_cap is None else position_cap
     park_qty, park_price = _park_holding(cash_park, prices, account, rules, park_blocked)
     park_left = park_qty
     sell_limit = (
@@ -353,13 +359,16 @@ def plan_intents(
                 skipped[symbol] = "No price for it today."
             continue
         limit, stop = entry_prices(rules, limits, symbol, price, short)
+        if not use_stops:
+            stop = None
         sized = min(abs(weight), max_fraction) * account.equity
         available = cash
         if park_left > 0 and sell_limit > 0 and park_symbol is not None:
             available += money.notional(park_symbol, park_left, sell_limit)
         dollars = min(sized, available)
         qty = rules.floor_qty(symbol, dollars / money.unit_cost(symbol, limit))
-        qty = cap_by_risk(rules, limits, symbol, qty, limit, stop, account.equity, short)
+        if use_stops:
+            qty = cap_by_risk(rules, limits, symbol, qty, limit, stop, account.equity, short)
         if qty <= 0:
             if skipped is not None:
                 skipped[symbol] = _too_small(rules, symbol, limit, available, sized)

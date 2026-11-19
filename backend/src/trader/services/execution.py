@@ -113,9 +113,14 @@ def refresh_intent(
         stop = None
         qty = min(float(row.qty), cap_by_cash)
     else:
-        cap_by_limits = rules.floor_qty(row.symbol, limits.max_entry_fraction() * account.equity / unit)
+        cap = ctx.strategy.position_cap()
+        fraction = limits.max_entry_fraction() if cap is None else cap
+        if not ctx.strategy.uses_stops():
+            stop = None
+        cap_by_limits = rules.floor_qty(row.symbol, fraction * account.equity / unit)
         qty = min(float(row.qty), cap_by_limits, cap_by_cash)
-        qty = cap_by_risk(rules, limits, row.symbol, qty, limit, stop, account.equity, short)
+        if ctx.strategy.uses_stops():
+            qty = cap_by_risk(rules, limits, row.symbol, qty, limit, stop, account.equity, short)
     if qty <= 0:
         wanted = f"the smallest {row.symbol} order" if rules.crypto else f"one {row.symbol} {rules.unit}"
         return None, Violation(code="insufficient_cash", message=f"Not enough buying power for {wanted}.")
@@ -199,6 +204,8 @@ def submit_approved(ctx: AppContext) -> SubmitResult:
                         pending_new_positions=len(new_entries - account.held_symbols()),
                         whole_units=ctx.rules.whole_units(),
                         cash_symbols=cash_symbols,
+                        position_cap=ctx.strategy.position_cap(),
+                        require_stops=ctx.strategy.uses_stops(),
                     )
                     violations = list(check_order(intent, account, ctx.limits, risk_ctx).violations)
                 if violations or intent is None:

@@ -8,7 +8,7 @@ import pytest
 
 from tests.helpers import UNIVERSE, trending_frame
 from trader.data.synthetic import SyntheticBarSource
-from trader.strategies import Momentum, TrendFollowing, TrendWithBills, get_strategy
+from trader.strategies import Momentum, SpyTrend, TrendFollowing, TrendWithBills, get_strategy
 
 
 def synthetic(start: str = "2014-01-01", end: str = "2026-11-12") -> pd.DataFrame:
@@ -45,7 +45,9 @@ def test_momentum_picks_top_n_with_positive_returns_and_holds_for_the_month():
     assert (month.nunique() == 1).all()  # weights only change on the month's first trading day
 
 
-@pytest.mark.parametrize("strategy", [TrendFollowing(50), Momentum(60, 5, 2), TrendWithBills(50)], ids=repr)
+@pytest.mark.parametrize(
+    "strategy", [TrendFollowing(50), Momentum(60, 5, 2), TrendWithBills(50), SpyTrend(50)], ids=repr
+)
 def test_no_lookahead_truncating_the_future_changes_nothing(strategy):
     closes = synthetic()
     full = strategy.target_weights(closes)
@@ -54,7 +56,7 @@ def test_no_lookahead_truncating_the_future_changes_nothing(strategy):
         pd.testing.assert_frame_equal(full.loc[:cut], truncated)
 
 
-@pytest.mark.parametrize("name", ["trend", "momentum", "trend-bil"])
+@pytest.mark.parametrize("name", ["trend", "momentum", "trend-bil", "spy-trend"])
 def test_weights_are_valid(name):
     weights = get_strategy(name).target_weights(synthetic())
     assert ((weights >= 0) & (weights <= 1)).all().all()
