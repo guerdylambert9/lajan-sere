@@ -90,11 +90,16 @@ def run_backtest(
     config = config or BacktestConfig()
     park = strategy.cash_park()
     park_symbol = park.symbol if park is not None else None
-    listed = [s for s in (universe or list(closes.columns)) if s in closes.columns]
+    base = list(closes.columns) if universe is None else list(universe)
+    listed = [s for s in strategy.traded_universe(base) if s in closes.columns]
     if park_symbol is not None and park_symbol not in closes.columns:
         raise ValueError(
             f"No {park_symbol} prices. {strategy.name} puts cash beyond a {park.buffer:.0%} buffer into it."
         )
+    absent = [s for s in strategy.extra_symbols() if s != park_symbol and s not in closes.columns]
+    if absent:
+        needed = ", ".join(absent)
+        raise ValueError(f"No {needed} prices. {strategy.name} holds them.")
     symbols = [s for s in listed if s != park_symbol]
     price_symbols = [*symbols, *([park_symbol] if park_symbol and park_symbol not in symbols else [])]
     rules = rules or AssetRules.for_symbols(price_symbols)
@@ -257,6 +262,8 @@ def run_backtest(
             exclude=stopped | missing,
             rules=rules,
             cash_park=park,
+            position_cap=strategy.position_cap(),
+            use_stops=strategy.uses_stops(),
         )
         for intent in intents:
             price = today[intent.symbol]

@@ -73,7 +73,7 @@ def run_nightly(
     ctx: AppContext, as_of: date | None = None, force: bool = False, scan: bool = True
 ) -> PipelineResult:
     settings = ctx.settings
-    universe = settings.universe_list
+    universe = ctx.strategy.traded_universe(settings.universe_list)
     end = as_of or ctx.bar_date()
     start = end - timedelta(days=ctx.strategy.history_days())
     symbols = list(dict.fromkeys([*universe, *ctx.strategy.extra_symbols(), settings.benchmark_symbol]))
@@ -139,6 +139,8 @@ def run_nightly(
             skipped=skipped,
             rules=ctx.rules,
             cash_park=park,
+            position_cap=ctx.strategy.position_cap(),
+            use_stops=ctx.strategy.uses_stops(),
         )
         save_snapshot(
             session,
@@ -172,6 +174,8 @@ def run_nightly(
                 extra_buying_power=freed_cash([i for i in intents if i.kind == IntentKind.EXIT], account),
                 whole_units=ctx.rules.whole_units(),
                 cash_symbols=cash_symbols,
+                position_cap=ctx.strategy.position_cap(),
+                require_stops=ctx.strategy.uses_stops(),
             )
             violations = list(check_order(intent, account, ctx.limits, risk_ctx).violations)
             vetoes = settings.ai_veto_rating_set

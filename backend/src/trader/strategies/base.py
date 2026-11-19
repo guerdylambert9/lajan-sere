@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +75,28 @@ class Strategy(ABC):
         """Symbols to price besides the traded universe, such as the cash fund."""
         park = self.cash_park()
         return (park.symbol,) if park is not None else ()
+
+    def traded_universe(self, universe: Sequence[str]) -> list[str]:
+        """`universe`, plus symbols this strategy holds that the list leaves out.
+
+        A cash-park symbol is not added. It is cash, not one of the signals.
+        """
+        park = self.cash_park()
+        skip = park.symbol if park is not None else None
+        extra = [symbol for symbol in self.extra_symbols() if symbol != skip]
+        return list(dict.fromkeys([*universe, *extra]))
+
+    def position_cap(self) -> float | None:
+        """Largest share of equity one new position may take, or None for the account's cap.
+
+        None keeps the 10% position cap and the per-trade risk limit. A strategy that puts the
+        whole account in one name returns 1.0.
+        """
+        return None
+
+    def uses_stops(self) -> bool:
+        """False when this strategy's own rule is the only exit, so entries carry no stop."""
+        return True
 
     def history_days(self) -> int:
         """Calendar days of history the live pipeline fetches so its signals match the backtest."""

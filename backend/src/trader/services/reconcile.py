@@ -126,9 +126,10 @@ def reconcile(ctx: AppContext) -> ReconcileResult:
                 )
 
         open_orders = ctx.broker.get_open_orders()
-        universe = set(settings.universe_list)
+        universe = set(ctx.strategy.traded_universe(settings.universe_list))
         park = ctx.strategy.cash_park()
         cash_symbols = {park.symbol} if park is not None else set()
+        stops_required = ctx.strategy.uses_stops()
         unit = f"{ctx.rules.unit}s"
         for position in ctx.broker.get_positions():
             if position.qty < 0 and not ctx.is_forex:  # only the forex book may sell short
@@ -145,7 +146,11 @@ def reconcile(ctx: AppContext) -> ReconcileResult:
                 continue
             # A long needs a sell stop under it, a short a buy stop over it.
             # The cash fund is exempt: it is cash, so it has no stop and is not an unmanaged ETF.
-            if position.symbol not in cash_symbols and not any(
+            # spy-trend holds SPY or BIL with no stop; any other holding still needs one.
+            needs_stop = position.symbol not in cash_symbols and (
+                stops_required or position.symbol not in ctx.strategy.extra_symbols()
+            )
+            if needs_stop and not any(
                 o.symbol == position.symbol and o.protects(position.qty) for o in open_orders
             ):
                 held = (
