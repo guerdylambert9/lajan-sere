@@ -32,6 +32,8 @@ const NO_PROGRESS: LearnProgress = { lessons: {}, quizzes: {} };
 const MAIN_BOOK: Book = { id: "stocks", label: "Stocks", path: "/api", account_label: "", mode: "DEMO", pending_proposals: 0 };
 
 function describeStrategy(strategy: Status["strategy"]): string {
+  if (strategy.name === "spy-trend")
+    return `Hold SPY above its ${String(strategy.window)}-day average and BIL otherwise, one position for the whole account`;
   if (strategy.name === "trend")
     return `Trend following on a ${String(strategy.window)}-day average${strategy.shorts ? ", long and short," : ""}`;
   if (strategy.name === "momentum") return `Momentum: top ${String(strategy.top_n)} by ${String(strategy.lookback)}-day return`;
@@ -318,8 +320,10 @@ export default function App() {
               <div>
                 <h1>{copy.title}</h1>
                 <p className="muted">
-                  {describeStrategy(status.strategy)} across {copy.holdings(status.universe.length)}, measured against{" "}
-                  {status.benchmark}. {market}
+                  {status.strategy.name === "spy-trend"
+                    ? `${describeStrategy(status.strategy)}, measured against ${status.benchmark}. `
+                    : `${describeStrategy(status.strategy)} across ${copy.holdings(status.universe.length)}, measured against ${status.benchmark}. `}
+                  {market}
                 </p>
               </div>
               <KillSwitch state={status.kill_switch} onEngage={engage} onRelease={release} />

@@ -21,6 +21,11 @@ from trader.assets import is_forex_symbol, split_pair
 DEFAULT_UNIVERSE = "SPY,QQQ,IWM,EFA,EEM,TLT,IEF,GLD,DBC,VNQ"
 # The 11 Select Sector SPDR ETFs: a fixed list, so a backtest of it has no survivorship bias.
 DEFAULT_WATCHLIST = "XLB,XLC,XLE,XLF,XLI,XLK,XLP,XLRE,XLU,XLV,XLY"
+# The stock paper desk, used only when STRATEGY is unset. One fully invested position: SPY while
+# its close is above its 200-day average, and BIL otherwise. Crypto and forex keep trend.
+STOCK_DEFAULTS: dict[str, Any] = {
+    "strategy": "spy-trend",
+}
 # Point this at another settings file to run a second account, e.g. TRADER_ENV_FILE=../.env.b
 ENV_FILE_VAR = "TRADER_ENV_FILE"
 # The demo's made-up trades go to their own file unless DATABASE_URL is set.
@@ -201,7 +206,8 @@ class Settings(BaseSettings):
     reports_dir: str = "reports"
     frontend_dist: str = "../frontend/dist"
 
-    # Strategy
+    # Strategy. Unset, the stock book uses spy-trend (STOCK_DEFAULTS). Crypto and forex keep
+    # trend unless their own file sets STRATEGY. Naming trend, momentum or trend-bil leaves that rule.
     strategy: str = "trend"
     universe: str = DEFAULT_UNIVERSE
     watchlist: str = DEFAULT_WATCHLIST  # the scanner ranks these; ideas only, never orders
@@ -264,9 +270,11 @@ class Settings(BaseSettings):
     def _book_defaults(self) -> Settings:
         provided = set(self.model_fields_set)
         self._provided = frozenset(provided)
-        defaults = {AssetClass.CRYPTO: CRYPTO_DEFAULTS, AssetClass.FOREX: FOREX_DEFAULTS}.get(
-            self.asset_class, {}
-        )
+        defaults = {
+            AssetClass.STOCKS: STOCK_DEFAULTS,
+            AssetClass.CRYPTO: CRYPTO_DEFAULTS,
+            AssetClass.FOREX: FOREX_DEFAULTS,
+        }.get(self.asset_class, {})
         if self.asset_class == AssetClass.FOREX:
             defaults = defaults | PAIR_SETS[self.pair_set]
         for name, value in defaults.items():

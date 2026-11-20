@@ -10,14 +10,14 @@ One rule runs through all of it: **AI proposes, code decides.** Rules (and later
 
 ## What it does
 
-- **Signals.** Two rules strategies on a basket of ETFs: trend following (hold what trades above its 200-day average) and momentum (the top 3 by 12-month return, skipping the last month, rebalanced monthly).
+- **Signals.** The stock paper desk runs `spy-trend`: hold SPY while its close is above its 200-day average, otherwise hold BIL, one fully invested position. Put `STRATEGY=spy-trend` in `.env` (that is the line in `.env.example`). Naming `trend`, `momentum` or `trend-bil` keeps that rule, and the watchlist scanner still only ranks ideas.
 - **Recommendations.** Every evening each symbol gets a call (Buy, Sell, Hold or Stay out) with the rule's reason in plain words, the limit, the stop, the shares, the dollars at risk, and the rule's track record. A Buy that got no order says why.
 - **Watchlist scanner.** Ranks a list you choose (the 11 sector ETFs to start) the way the momentum rule would, with entry, stop and size. Ideas stay labeled untested, and can't be sent, until a strategy covering the list passes Gate 1.
 - **Learn section.** 24 short lessons for beginners in seven modules, crypto and forex included (short selling and the exotic pairs too), with quizzes, a glossary, and tap-to-explain terms on the dashboard. Progress is saved in the ledger.
 - **Your settings.** Each book's tab sets its stop-loss, and the forex tab picks standard or exotic pairs and switches short selling on or off. Riskier choices show plain warnings and wait for your OK.
 - **Risk checks.** Every order is checked when it is planned and again right before it is sent: size, risk per trade, open positions, daily loss, drawdown, daily order cap, trading window, duplicates, buying power, and no short selling (the forex book can sell short only once you switch it on).
 - **Approvals.** From the dashboard, the command line or Telegram buttons. Nothing goes out without you unless you turn on `AUTO_APPROVE`.
-- **Execution.** Limit orders through the official `alpaca-py` SDK. Every entry carries a protective stop held at Alpaca, so it protects you even when this app is off.
+- **Execution.** Limit orders through the official `alpaca-py` SDK. Basket rules attach a protective stop at Alpaca. `spy-trend` does not: it holds SPY or BIL until the rule flips, and every order still waits for your approval.
 - **Broker check.** Every afternoon the ledger is compared with Alpaca: unfilled entries are canceled, equity is recorded, and the kill switch engages by itself at the drawdown limit.
 - **Kill switch.** One button cancels pending entries and blocks new orders. Protective stops stay in place.
 - **Backtests and gates.** The backtester uses the same order planner as live trading, so a backtest trades exactly the way the app would. Gates 0 to 5 decide each step forward.
@@ -58,7 +58,7 @@ Times are New York time on weekdays. With the scheduler on (`ENABLE_SCHEDULER=tr
 |---|---|---|
 | 5:15 pm | Signals (`trader run-nightly`) | Reads the day's closes, makes today's recommendations, plans whole-share orders, runs the risk checks, posts proposals to the dashboard and Telegram, and scans the watchlist. |
 | Evening | You | Approve or reject each proposal. |
-| 9:50 am next trading day | Send (`trader submit`) | Re-prices each approved order at the latest price, skips entries that gapped up too far, re-checks the limits, and sends limit orders. Entries carry a stop 8% below; exits cancel that stop first. |
+| 9:50 am next trading day | Send (`trader submit`) | Re-prices each approved order at the latest price, skips entries that gapped up too far, re-checks the limits, and sends limit orders. Basket entries carry a stop 8% below. `spy-trend` sends the share order with no stop. Exits cancel a stop first. |
 | 4:30 pm | Broker check (`trader reconcile`) | Compares the ledger with Alpaca, cancels entries that didn't fill, records equity, and engages the kill switch at 10% below the peak. |
 
 ## The road to live trading
@@ -105,6 +105,14 @@ Write down what would count as a pass before you run `gate1`. Every run is logge
 With `DATA_SOURCE=synthetic` these commands run, but the prices are random, so the results mean nothing. Gate 1 usually fails on them, as it should.
 
 ### Phase 2: run it on paper
+
+The stock book proposes `spy-trend` orders when `.env` contains this line:
+
+```ini
+STRATEGY=spy-trend
+```
+
+Leave `TRADING_MODE=paper` and `AUTO_APPROVE=false`. Nothing is sent until you approve it. From `backend/` (venv active): `trader serve`. From `frontend/`: `npm run dev`, then open http://localhost:5173. After the close, `trader run-nightly` (or the dashboard's **Run tonight's signals**) writes the proposals.
 
 1. Set `ENABLE_SCHEDULER=true` and run `trader serve` on a computer that stays on, or use Docker on a small server (see below).
 2. Optionally set up Telegram approvals (see below).

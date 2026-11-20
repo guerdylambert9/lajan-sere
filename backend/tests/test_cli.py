@@ -19,6 +19,8 @@ def env(monkeypatch, tmp_path):
         "UNIVERSE": "SPY,QQQ,TLT,GLD",
         "BROKER": "fake",
         "DATA_SOURCE": "synthetic",
+        # These commands keep testing the trend rule. An unset STRATEGY is spy-trend for stocks.
+        "STRATEGY": "trend",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -84,6 +86,7 @@ def test_env_file_option_selects_another_account(env, monkeypatch):
     assert "account=A" in runner.invoke(app, ["status"]).output
     other = env / ".env.b"
     other.write_text("ACCOUNT_LABEL=B\nSTRATEGY=momentum\n")
+    monkeypatch.delenv("STRATEGY", raising=False)  # the file's rule must win over the fixture's
     monkeypatch.setenv(ENV_FILE_VAR, "")  # the option sets this; monkeypatch removes it afterwards
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{env / 'trader-b.db'}")
     result = runner.invoke(app, ["--env-file", str(other), "status"])
