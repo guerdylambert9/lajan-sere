@@ -192,9 +192,11 @@ def submit_approved(ctx: AppContext) -> SubmitResult:
                 intent, problem = refresh_intent(ctx, row, account)
                 violations = [problem] if problem else []
                 if intent is not None:
+                    # The nightly check uses the names this strategy holds. spy-trend adds BIL
+                    # beside SPY; the configured list alone does not.
                     risk_ctx = RiskContext(
                         now=ctx.now(),
-                        universe=set(settings.universe_list),
+                        universe=set(ctx.strategy.traded_universe(settings.universe_list)),
                         kill_switch_engaged=False,
                         orders_submitted_today=sent_today,
                         used_client_order_ids=used_ids,
