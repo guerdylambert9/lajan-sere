@@ -18,7 +18,7 @@ import { ACTION_WORD, actionOf, clockTime, moment, qty } from "./format";
 import { LESSONS } from "./learn/course";
 import { GlossaryView, LearnHome, LearnPanel, LessonView, QuizView, lessonsDone } from "./learn/LearnViews";
 import { useRoute } from "./learn/route";
-import type { Book, DeskData, JobName, JobResult, LearnProgress, Proposal, Status, Tone } from "./types";
+import type { Book, DeskData, JobName, JobResult, LearnProgress, Proposal, Risk, Status, Tone } from "./types";
 
 type Load =
   | { kind: "loading" }
@@ -30,6 +30,16 @@ const REFRESH_MS = 30_000;
 const NO_PROGRESS: LearnProgress = { lessons: {}, quizzes: {} };
 // Until /books answers (or on an older server), the one book at /api.
 const MAIN_BOOK: Book = { id: "stocks", label: "Stocks", path: "/api", account_label: "", mode: "DEMO", pending_proposals: 0 };
+
+function spyTrendDesk(strategy: Status["strategy"], risk: Risk) {
+  if (strategy.name !== "spy-trend") return null;
+  const window = strategy.window;
+  return {
+    window: typeof window === "number" ? window : 200,
+    stopPct: risk.limits.stop_loss_pct,
+    capPct: risk.limits.max_position_pct,
+  };
+}
 
 function describeStrategy(strategy: Status["strategy"]): string {
   if (strategy.name === "spy-trend")
@@ -273,6 +283,7 @@ export default function App() {
   const { data, at } = load;
   const { status, risk, progress } = data;
   const copy = bookCopy(status);
+  const spyTrend = spyTrendDesk(status.strategy, risk);
   const onDesk = route.view === "desk";
   const market = copy.market
     ? copy.market
@@ -334,7 +345,9 @@ export default function App() {
                 Can't read the account from the broker: {status.broker_error}
               </p>
             )}
-            {status.account && <Stats account={status.account} maxPositions={risk.limits.max_open_positions} />}
+            {status.account && (
+              <Stats account={status.account} maxPositions={spyTrend ? 1 : risk.limits.max_open_positions} />
+            )}
 
             <div className="main-grid">
               <Recommendations
@@ -345,14 +358,16 @@ export default function App() {
                 schedulerRunning={status.scheduler_running}
                 copy={copy}
                 onDecide={decide}
+                spyTrend={spyTrend}
               />
               <div className="side">
                 <EquityChart points={data.equity} benchmark={status.benchmark} />
-                <RiskMeters risk={risk} kind={copy.kind} />
+                <RiskMeters risk={risk} kind={copy.kind} spyTrend={spyTrend} />
                 <Settings
                   key={book.path}
                   client={client}
                   kind={copy.kind}
+                  spyTrend={spyTrend}
                   onSaved={(message) => {
                     say(message, "good");
                     void refresh();
@@ -361,7 +376,7 @@ export default function App() {
               </div>
             </div>
 
-            <PositionsTable positions={data.positions} copy={copy} />
+            <PositionsTable positions={data.positions} copy={copy} averageExit={spyTrend != null} />
             {copy.kind === "stocks" && <Scanner scan={data.scan} />}
             <OrdersTable orders={data.orders} copy={copy} />
 

@@ -13,6 +13,8 @@ interface Props {
   schedulerRunning: boolean;
   copy: BookCopy;
   onDecide: (proposal: Proposal, approve: boolean) => Promise<void>;
+  /** spy-trend exits on its average, so a hold with no stop is the rule. */
+  spyTrend?: { window: number } | null;
 }
 
 const CALL_WORD: Record<RecItem["call"], string> = {
@@ -37,7 +39,16 @@ const STATUS_WORD: Record<string, string> = {
   error: "Error",
 };
 
-export function Recommendations({ recs, pending, recent, equity, schedulerRunning, copy, onDecide }: Props) {
+export function Recommendations({
+  recs,
+  pending,
+  recent,
+  equity,
+  schedulerRunning,
+  copy,
+  onDecide,
+  spyTrend = null,
+}: Props) {
   const [busy, setBusy] = useState<number | null>(null);
   const items = recs?.items ?? [];
   const pendingById = new Map(pending.map((p) => [p.id, p]));
@@ -115,7 +126,9 @@ export function Recommendations({ recs, pending, recent, equity, schedulerRunnin
         </p>
       )}
 
-      {rest.length > 0 && <CallsTable items={rest} schedulerRunning={schedulerRunning} copy={copy} />}
+      {rest.length > 0 && (
+        <CallsTable items={rest} schedulerRunning={schedulerRunning} copy={copy} spyTrend={spyTrend} />
+      )}
 
       {decided.length > 0 && (
         <div className="decided">
@@ -281,11 +294,17 @@ function Ticket({
   );
 }
 
-function note(item: RecItem, schedulerRunning: boolean, copy: BookCopy): string {
+function note(
+  item: RecItem,
+  schedulerRunning: boolean,
+  copy: BookCopy,
+  spyTrend: { window: number } | null,
+): string {
   const proposal = item.proposal;
   if (item.call === "hold" || item.call === "hold_short") {
     const stop = item.position?.stop_price;
-    if (stop == null) return "No protective stop at the broker.";
+    if (stop == null)
+      return spyTrend ? `The ${spyTrend.window}-day average is the exit.` : "No protective stop at the broker.";
     const atRisk = item.position?.at_risk;
     const floor = item.position?.stop_limit_price;
     const limitText = floor != null ? `, sells no lower than ${quote(floor, item.symbol)}` : "";
@@ -303,7 +322,17 @@ function note(item: RecItem, schedulerRunning: boolean, copy: BookCopy): string 
   return item.detail ?? "";
 }
 
-function CallsTable({ items, schedulerRunning, copy }: { items: RecItem[]; schedulerRunning: boolean; copy: BookCopy }) {
+function CallsTable({
+  items,
+  schedulerRunning,
+  copy,
+  spyTrend,
+}: {
+  items: RecItem[];
+  schedulerRunning: boolean;
+  copy: BookCopy;
+  spyTrend: { window: number } | null;
+}) {
   return (
     <div className="calls">
       <h3>The other calls</h3>
@@ -328,7 +357,7 @@ function CallsTable({ items, schedulerRunning, copy }: { items: RecItem[]; sched
                 </th>
                 <td className="why">{item.reason}</td>
                 <td className={`note ${item.proposal?.status === "blocked" || item.detail ? "warn-soft" : ""}`}>
-                  {note(item, schedulerRunning, copy)}
+                  {note(item, schedulerRunning, copy, spyTrend)}
                 </td>
               </tr>
             ))}

@@ -11,9 +11,25 @@ interface Meter {
   text: string;
 }
 
-export function RiskMeters({ risk, kind = "stocks" }: { risk: Risk; kind?: BookKind }) {
+/** Set only for spy-trend. Other strategies keep the account's stop, cap, and position slots. */
+export interface SpyTrendDesk {
+  window: number;
+  stopPct: number;
+  capPct: number;
+}
+
+export function RiskMeters({
+  risk,
+  kind = "stocks",
+  spyTrend = null,
+}: {
+  risk: Risk;
+  kind?: BookKind;
+  spyTrend?: SpyTrendDesk | null;
+}) {
   const { limits, usage } = risk;
   const loss = Math.max(0, -(usage.day_pnl_pct ?? 0));
+  const slots = spyTrend ? 1 : limits.max_open_positions;
   const meters: Meter[] = [
     {
       label: "Orders sent today",
@@ -24,8 +40,8 @@ export function RiskMeters({ risk, kind = "stocks" }: { risk: Risk; kind?: BookK
     {
       label: "Open positions",
       value: usage.open_positions ?? 0,
-      limit: limits.max_open_positions,
-      text: `${usage.open_positions ?? "–"} of ${limits.max_open_positions}`,
+      limit: slots,
+      text: `${usage.open_positions ?? "–"} of ${slots}`,
     },
     {
       label: "Below peak",
@@ -71,12 +87,23 @@ export function RiskMeters({ risk, kind = "stocks" }: { risk: Risk; kind?: BookK
         })}
       </ul>
       <ul className="limits-list">
-        <li>
-          A trade risks at most {limits.risk_per_trade_pct}% of equity, with its stop {limits.stop_loss_pct}% below
-          the entry{limits.allow_shorts ? " (above it for a short)" : ""}
-          {limits.stop_limit_band_pct ? ` and its limit ${limits.stop_limit_band_pct}% below the stop` : ""}.
-        </li>
-        <li>A new position starts at no more than {limits.max_position_pct}% of equity.</li>
+        {spyTrend ? (
+          <>
+            <li>One position for the whole account, with no {spyTrend.capPct}% cap.</li>
+            <li>
+              The {spyTrend.window}-day average is the exit, with no {spyTrend.stopPct}% stop.
+            </li>
+          </>
+        ) : (
+          <>
+            <li>
+              A trade risks at most {limits.risk_per_trade_pct}% of equity, with its stop {limits.stop_loss_pct}% below
+              the entry{limits.allow_shorts ? " (above it for a short)" : ""}
+              {limits.stop_limit_band_pct ? ` and its limit ${limits.stop_limit_band_pct}% below the stop` : ""}.
+            </li>
+            <li>A new position starts at no more than {limits.max_position_pct}% of equity.</li>
+          </>
+        )}
         <li>
           Hitting {limits.max_drawdown_pct}% below peak engages the kill switch; losing {limits.daily_loss_limit_pct}%
           in a day pauses new entries until tomorrow.
