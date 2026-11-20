@@ -11,6 +11,8 @@ interface Props {
   kind: BookKind;
   /** Called after a change takes effect, with the server's one-line summary. */
   onSaved: (message: string) => void;
+  /** spy-trend has no stop to edit. Other strategies keep the stop-loss control. */
+  spyTrend?: { window: number; stopPct: number; capPct: number } | null;
 }
 
 type PairSet = "standard" | "exotic";
@@ -51,7 +53,7 @@ function changesOf(prefs: Preferences, draft: Draft): PreferencesChange {
 
 /** The book's own settings: the stop-loss, and for forex the pair set and short selling. Riskier
  * choices come back with plain warnings, and only take effect once you confirm them. */
-export function Settings({ client, kind, onSaved }: Props) {
+export function Settings({ client, kind, onSaved, spyTrend = null }: Props) {
   const [prefs, setPrefs] = useState<Preferences | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [warnings, setWarnings] = useState<Notice[] | null>(null);
@@ -59,7 +61,9 @@ export function Settings({ client, kind, onSaved }: Props) {
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const skipStop = spyTrend != null;
   useEffect(() => {
+    if (skipStop) return;
     let live = true;
     client
       .preferences()
@@ -72,7 +76,22 @@ export function Settings({ client, kind, onSaved }: Props) {
     return () => {
       live = false;
     };
-  }, [client]);
+  }, [client, skipStop]);
+
+  if (spyTrend) {
+    return (
+      <section className="panel settings" aria-labelledby="settings-title">
+        <h2 id="settings-title">Your settings</h2>
+        <p>
+          One position for the whole account. The {spyTrend.window}-day average is the exit, with no {spyTrend.stopPct}%
+          stop and no {spyTrend.capPct}% cap.
+        </p>
+        <p className="muted small settings-foot">
+          Orders still wait for your approval. The next nightly run follows the average.
+        </p>
+      </section>
+    );
+  }
 
   if (!prefs || !draft) return null;
 

@@ -2,7 +2,16 @@ import type { BookCopy } from "../book";
 import { money, moment, pct, px, qty, signedMoney, trend } from "../format";
 import type { Order, Position } from "../types";
 
-export function PositionsTable({ positions, copy }: { positions: Position[]; copy: BookCopy }) {
+export function PositionsTable({
+  positions,
+  copy,
+  averageExit = false,
+}: {
+  positions: Position[];
+  copy: BookCopy;
+  /** spy-trend exits on the average, so a position without a stop is the rule. */
+  averageExit?: boolean;
+}) {
   return (
     <section className="section" aria-labelledby="positions-title">
       <h2 id="positions-title">Positions</h2>
@@ -39,7 +48,13 @@ export function PositionsTable({ positions, copy }: { positions: Position[]; cop
                   </td>
                   <td className="num">{pct(p.weight_pct)}</td>
                   <td className="num">
-                    {p.protected ? px(p.stop_price, p.symbol) : <span className="warn">No stop</span>}
+                    {averageExit && !p.protected ? (
+                      <span className="muted">The average is the exit</span>
+                    ) : p.protected ? (
+                      px(p.stop_price, p.symbol)
+                    ) : (
+                      <span className="warn">No stop</span>
+                    )}
                     {p.protected && p.stop_limit_price != null && (
                       <span className="stop-floor muted">sells no lower than {px(p.stop_limit_price, p.symbol)}</span>
                     )}

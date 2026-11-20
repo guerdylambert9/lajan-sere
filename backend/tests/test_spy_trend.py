@@ -11,16 +11,23 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from tests.helpers import TODAY, at, make_ctx, trending_frame
+from tests.helpers import TODAY, UNIVERSE, MutableClock, at, make_ctx, trending_frame
 from trader import ledger
+from trader.api.app import create_app
 from trader.backtest import BacktestConfig, run_backtest
+from trader.broker.fake import FakeBroker
 from trader.cli import app
+from trader.config import DEFAULT_WATCHLIST, Settings, TradingMode
+from trader.data.base import FrameBarSource
 from trader.models import AccountState, IntentKind, OrderIntent, ProposalStatus, Side
+from trader.notify.telegram import LogNotifier
 from trader.planner import plan_intents
 from trader.risk import RiskContext, RiskLimits, check_order
 from trader.services.approvals import decide_proposal
+from trader.services.context import build_context
 from trader.services.execution import submit_approved
 from trader.services.pipeline import run_nightly
 from trader.services.reconcile import reconcile
@@ -254,6 +261,147 @@ def test_explain_names_the_holding():
     assert "holds SPY" in reasons[SPY]
     assert "holds SPY" in reasons[BIL]
     assert "only SPY or BIL" in reasons["QQQ"]
+
+
+def _desk_frame(spy_up: bool) -> pd.DataFrame:
+    """Fixture closes only. SPY either climbs through its average or falls through it."""
+    index = pd.bdate_range(end=pd.Timestamp(TODAY), periods=320)
+    step = pd.Series(range(320), dtype=float).to_numpy()
+    spy = 400 + 0.5 * step if spy_up else 500 - step
+    return pd.DataFrame(
+        {
+            "SPY": spy,
+            "QQQ": 300 + 0.6 * step,
+            "IWM": 200.0,
+            "EFA": 80.0,
+            "TLT": 100.0,
+            "GLD": 180 + 0.2 * step,
+            BIL: 100.0,
+            "XLB": 50 + 0.3 * step,
+            "XLC": 40 + 0.05 * step,
+            "XLE": 70 - 0.1 * step,
+        },
+        index=index,
+    )
+
+
+def _stock_desk(frame: pd.DataFrame, **overrides: object):
+    """A stock book on fixture prices. Strategy is the stock default unless overrides name one."""
+    clock = MutableClock(at(TODAY, 17, 15))
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        universe=",".join(UNIVERSE),
+        benchmark="SPY",
+        broker="fake",
+        data_source="synthetic",
+        fake_broker_state="",
+        telegram_bot_token="",
+        telegram_chat_id="",
+        api_token="",
+        watchlist="XLB,XLC,XLE",
+        **overrides,
+    )
+    return build_context(
+        settings,
+        broker=FakeBroker(cash=100_000, now_fn=clock),
+        bars=FrameBarSource(frame),
+        notifier=LogNotifier(),
+        now_fn=clock,
+    )
+
+
+def _rows(ctx):
+    with ctx.session() as session:
+        return ledger.list_proposals(session, ctx.label)
+
+
+def test_the_stock_book_defaults_to_spy_trend_and_stays_on_paper():
+    stocks = Settings(_env_file=None)
+    assert stocks.strategy == "spy-trend"
+    assert stocks.watchlist == DEFAULT_WATCHLIST
+    assert stocks.trading_mode == TradingMode.PAPER
+    assert stocks.live_trading_confirmed is False
+    assert stocks.auto_approve is False
+
+    paper = Settings(_env_file=None, broker="alpaca")
+    assert paper.strategy == "spy-trend"
+    assert paper.trading_mode == TradingMode.PAPER
+    assert paper.live_trading_confirmed is False
+    assert paper.auto_approve is False
+    assert paper.mode_label == "PAPER"
+
+    assert Settings(_env_file=None, asset_class="crypto").strategy == "trend"
+    assert Settings(_env_file=None, asset_class="forex").strategy == "trend"
+    for name in ("trend", "momentum", "trend-bil"):
+        chosen = Settings(_env_file=None, strategy=name)
+        assert chosen.strategy == name
+        rule = get_strategy(name)
+        assert rule.name == name
+        assert rule.position_cap() is None
+        assert rule.uses_stops() is True
+
+
+def test_the_paper_desk_proposes_one_pending_spy_or_bil_order():
+    above = _stock_desk(_desk_frame(spy_up=True))
+    assert above.strategy.name == "spy-trend" and above.strategy.params()["window"] == 200
+    assert above.settings.trading_mode == TradingMode.PAPER
+    assert above.settings.auto_approve is False
+    held = run_nightly(above)
+    assert held.skipped_reason is None
+    assert held.targets[SPY] == 1 and held.targets[BIL] == 0
+    assert held.targets["QQQ"] == 0
+    rows = _rows(above)
+    assert len(rows) == 1
+    order = rows[0]
+    assert order.symbol == SPY and order.kind == IntentKind.ENTRY
+    assert order.status == ProposalStatus.PENDING
+    assert order.stop_price is None
+    assert order.qty * order.limit_price > 0.9 * 100_000
+
+    client = TestClient(create_app(above, start_background=False))
+    status = client.get("/api/status").json()
+    assert status["strategy"] == {"name": "spy-trend", "window": 200}
+    assert status["trading_mode"] == "paper" and status["auto_approve"] is False
+    recs = client.get("/api/recommendations").json()
+    assert "SPY" in recs["rule"] and "BIL" in recs["rule"]
+    buys = [item for item in recs["items"] if item["call"] == "buy"]
+    assert [item["symbol"] for item in buys] == [SPY]
+    assert buys[0]["proposal"]["status"] == "pending"
+    assert buys[0]["proposal"]["stop_price"] is None
+    assert buys[0]["proposal"]["notional"] > 0.9 * 100_000
+    scan = client.get("/api/scan").json()
+    assert scan["tested"] is False and "STRATEGY=momentum" in scan["how_to_test"]
+    assert {row["symbol"] for row in scan["rows"]} == {"XLB", "XLC", "XLE"}
+    idea = next(row for row in scan["rows"] if row["label"] == "buy_idea")
+    assert idea["stop"] is not None
+    assert idea["qty"] * idea["entry"] <= 0.10 * 100_000 + 1e-6
+    assert {row.symbol for row in rows}.isdisjoint({"XLB", "XLC", "XLE", "QQQ"})
+
+    below = _stock_desk(_desk_frame(spy_up=False))
+    defensive = run_nightly(below, scan=False)
+    assert defensive.skipped_reason is None
+    assert defensive.targets[BIL] == 1 and defensive.targets[SPY] == 0
+    parked = _rows(below)
+    assert len(parked) == 1
+    assert parked[0].symbol == BIL and parked[0].status == ProposalStatus.PENDING
+    assert parked[0].stop_price is None
+    assert parked[0].qty * parked[0].limit_price > 0.9 * 100_000
+
+
+def test_naming_another_strategy_keeps_its_capped_orders():
+    frame = _desk_frame(spy_up=True)
+    for name in ("trend", "momentum", "trend-bil"):
+        ctx = _stock_desk(frame, strategy=name)
+        assert ctx.strategy.name == name
+        result = run_nightly(ctx, scan=False)
+        assert result.skipped_reason is None, name
+        entries = [row for row in _rows(ctx) if row.kind == IntentKind.ENTRY and row.symbol != BIL]
+        assert entries, name
+        assert all(row.stop_price is not None for row in entries)
+        assert all(row.qty * row.limit_price <= 0.10 * 100_000 * 1.001 for row in entries)
+        assert all(row.status == ProposalStatus.PENDING for row in _rows(ctx))
+        assert not any(row.symbol == SPY and row.qty * row.limit_price > 0.5 * 100_000 for row in entries)
 
 
 @pytest.fixture
