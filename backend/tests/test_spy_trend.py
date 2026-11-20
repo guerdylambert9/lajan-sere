@@ -389,6 +389,38 @@ def test_the_paper_desk_proposes_one_pending_spy_or_bil_order():
     assert parked[0].qty * parked[0].limit_price > 0.9 * 100_000
 
 
+def test_an_approved_spy_trend_bil_buy_is_not_rejected_for_the_ticker_list():
+    """Send approved orders must accept the defensive BIL buy spy-trend already proposed."""
+    below = _stock_desk(_desk_frame(spy_up=False))
+    result = run_nightly(below, scan=False)
+    assert result.skipped_reason is None
+    assert result.targets[BIL] == 1 and result.targets[SPY] == 0
+    (row,) = _rows(below)
+    assert row.symbol == BIL and row.kind == IntentKind.ENTRY
+    assert row.status == ProposalStatus.PENDING
+    with below.session() as session:
+        decide_proposal(session, row.id, True, by="test")
+    below.now_fn.set(TODAY + timedelta(days=1), 10, 0)
+    submitted = submit_approved(below)
+    saved = _rows(below)
+    messages = [
+        violation.get("message", "")
+        for proposal in saved
+        for violation in (proposal.violations or [])
+        if isinstance(violation, dict)
+    ]
+    assert not any("not on the approved ticker list" in message for message in messages)
+    assert not any(
+        violation.get("code") == "not_in_universe"
+        for proposal in saved
+        for violation in (proposal.violations or [])
+        if isinstance(violation, dict)
+    )
+    assert submitted.submitted == [row.id]
+    assert not submitted.blocked
+    assert [position.symbol for position in below.broker.get_positions()] == [BIL]
+
+
 def test_naming_another_strategy_keeps_its_capped_orders():
     frame = _desk_frame(spy_up=True)
     for name in ("trend", "momentum", "trend-bil"):
